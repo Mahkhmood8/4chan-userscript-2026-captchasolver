@@ -1,12 +1,11 @@
 // ==UserScript==
-// @name         4chan TCaptcha ImGui Debugger (Refactored v13.1)
-// @namespace    4chan-imgui-debugger
+// @name         4chan TCaptcha Debugger (No CV)
+// @namespace    4chan-debugger
 // @match        https://*.4chan.org/*
 // @match        https://*.4channel.org/*
-// @require      https://docs.opencv.org/4.x/opencv.js
 // @grant        unsafeWindow
 // @run-at       document-end
-// @version      13.1
+// @version      14.0
 // ==/UserScript==
 
 (function() {
@@ -23,12 +22,10 @@
             WIDTH: 550,
             COLORS: Object.freeze({
                 PRIMARY: '#007acc',
-                PREDICT: '#ff3e3e',
                 BG_DARK: '#1e1e1e',
                 BG_HEADER: '#252526',
                 BG_LOG: '#000000',
                 BG_CARD: '#2d2d2d',
-                BG_PREDICTED: '#452121',
                 BORDER: '#333',
                 BORDER_CARD: '#444',
                 TEXT: '#eee',
@@ -36,18 +33,6 @@
                 TEXT_SUCCESS: '#6a9955',
                 TEXT_LOG: '#b5cea8'
             })
-        }),
-        CV: Object.freeze({
-            MORPH_KERNEL: 5,
-            BLOCK_SIZE: 11,
-            THRESH_C: 2,
-            MIN_AREA: 100,
-            APPROX_EPSILON: 0.04,
-            ANGLE_TOLERANCE: 15,        // degrees from 90
-            EROSION_FACTOR: 0.1,
-            INK_INTENSITY: 100,
-            EMPTY_THRESHOLD: 0.015,     // fill ratio below this = empty
-            NMS_OVERLAP: 0.6            // center distance threshold for NMS
         }),
         TIMING: Object.freeze({
             HOOK_RETRY: 250,
@@ -58,7 +43,8 @@
     const LogicType = Object.freeze({
         UNKNOWN: 'UNKNOWN',
         MAX: 'MAX',
-        EXACT: 'EXACT'
+        EXACT: 'EXACT',
+        NO_PAIR: 'NO_PAIR'
     });
 
     // ═══════════════════════════════════════════════════════════════
@@ -82,224 +68,64 @@
         $(id) { return document.getElementById(id); }
     };
 
-    const MathUtils = {
-        distance(a, b) {
-            return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2);
-        },
-
-        getAngle(p1, p2, p3) {
-            const v1 = { x: p1.x - p2.x, y: p1.y - p2.y };
-            const v2 = { x: p3.x - p2.x, y: p3.y - p2.y };
-            const dot = v1.x * v2.x + v1.y * v2.y;
-            const mag1 = Math.sqrt(v1.x ** 2 + v1.y ** 2);
-            const mag2 = Math.sqrt(v2.x ** 2 + v2.y ** 2);
-            const cosTheta = dot / (mag1 * mag2 + 1e-7);
-            return Math.acos(Math.max(-1, Math.min(1, cosTheta))) * (180 / Math.PI);
-        }
-    };
-
-    class MatCollector {
-        constructor() { this.mats = []; }
-        track(...items) { this.mats.push(...items.flat()); return items.length === 1 ? items[0] : items; }
-        cleanup() {
-            this.mats.forEach(m => {
-                try { if (m?.delete && !m.isDeleted?.()) m.delete(); } catch {}
-            });
-            this.mats = [];
-        }
-    }
-
     // ═══════════════════════════════════════════════════════════════
-    // BOX DETECTOR
-    // ═══════════════════════════════════════════════════════════════
-
-    class BoxDetector {
-        static get isReady() {
-            return typeof cv !== 'undefined' && cv.Mat;
-        }
-
-        static analyze(imgElement) {
-            if (!this.isReady) return { empty: 0, total: 0, error: 'OpenCV not loaded' };
-            const collector = new MatCollector();
-            try {
-                const { gray, thresh } = this.#preprocess(imgElement, collector);
-                const candidates = this.#findCandidates(thresh, collector);
-                const boxes = this.#suppressOverlaps(candidates);
-                const empty = this.#countEmpty(boxes, gray, collector);
-                return { empty, total: boxes.length, error: null };
-            } catch (e) {
-                return { empty: 0, total: 0, error: e.message };
-            } finally {
-                collector.cleanup();
-            }
-        }
-
-        static #preprocess(img, collector) {
-            const src = collector.track(cv.imread(img));
-            const gray = collector.track(new cv.Mat());
-            cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-            const kernelSize = CONFIG.CV.MORPH_KERNEL;
-            const kernel = collector.track(cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(kernelSize, kernelSize)));
-            const blackhat = collector.track(new cv.Mat());
-            cv.morphologyEx(gray, blackhat, cv.MORPH_BLACKHAT, kernel);
-            const threshOtsu = collector.track(new cv.Mat());
-            cv.threshold(blackhat, threshOtsu, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
-            const threshAdapt = collector.track(new cv.Mat());
-            cv.adaptiveThreshold(blackhat, threshAdapt, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, CONFIG.CV.BLOCK_SIZE, CONFIG.CV.THRESH_C);
-            const thresh = collector.track(new cv.Mat());
-            cv.bitwise_and(threshOtsu, threshAdapt, thresh);
-            return { gray, thresh };
-        }
-
-        static #findCandidates(thresh, collector) {
-            const contours = collector.track(new cv.MatVector());
-            const hierarchy = collector.track(new cv.Mat());
-            cv.findContours(thresh, contours, hierarchy, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE);
-            const { MIN_AREA, APPROX_EPSILON, ANGLE_TOLERANCE } = CONFIG.CV;
-            const candidates = [];
-            for (let i = 0; i < contours.size(); i++) {
-                const cnt = contours.get(i);
-                const area = cv.contourArea(cnt);
-                if (area < MIN_AREA) continue;
-                const peri = cv.arcLength(cnt, true);
-                const approx = new cv.Mat();
-                cv.approxPolyDP(cnt, approx, APPROX_EPSILON * peri, true);
-                if (approx.rows !== 4 || !cv.isContourConvex(approx)) { approx.delete(); continue; }
-                const pts = [];
-                for (let j = 0; j < 4; j++) { pts.push({ x: approx.data32S[j * 2], y: approx.data32S[j * 2 + 1] }); }
-                approx.delete();
-                const angles = pts.map((_, idx) => {
-                    const p1 = pts[(idx + 3) % 4], p2 = pts[idx], p3 = pts[(idx + 1) % 4];
-                    return MathUtils.getAngle(p1, p2, p3);
-                });
-                if (!angles.every(a => Math.abs(a - 90) <= ANGLE_TOLERANCE)) continue;
-                const M = cv.moments(cnt);
-                if (M.m00 === 0) continue;
-                const cx = M.m10 / M.m00, cy = M.m01 / M.m00;
-                const rect = cv.boundingRect(cnt);
-                candidates.push({ contour: cnt, center: { x: cx, y: cy }, width: Math.max(rect.width, rect.height), area });
-            }
-            return candidates;
-        }
-
-        static #suppressOverlaps(candidates) {
-            candidates.sort((a, b) => b.area - a.area);
-            const kept = [];
-            for (const box of candidates) {
-                const dominated = kept.some(k => MathUtils.distance(box.center, k.center) < k.width * CONFIG.CV.NMS_OVERLAP);
-                if (!dominated) kept.push(box);
-            }
-            return kept;
-        }
-
-        static #countEmpty(boxes, gray, collector) {
-            const { EROSION_FACTOR, INK_INTENSITY, EMPTY_THRESHOLD } = CONFIG.CV;
-            let emptyCount = 0;
-            for (const box of boxes) {
-                const mask = collector.track(cv.Mat.zeros(gray.rows, gray.cols, cv.CV_8UC1));
-                const vec = collector.track(new cv.MatVector());
-                vec.push_back(box.contour);
-                cv.drawContours(mask, vec, 0, new cv.Scalar(255), -1);
-                const erosionIters = Math.max(Math.floor(box.width * EROSION_FACTOR), 1);
-                const erosionKernel = collector.track(cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(3, 3)));
-                const innerMask = collector.track(new cv.Mat());
-                cv.erode(mask, innerMask, erosionKernel, new cv.Point(-1, -1), erosionIters);
-                const meanVal = cv.mean(gray, innerMask)[0];
-                const threshVal = Math.min(INK_INTENSITY, meanVal - 10);
-                const inkThresh = collector.track(new cv.Mat());
-                cv.threshold(gray, inkThresh, threshVal, 255, cv.THRESH_BINARY_INV);
-                const masked = collector.track(new cv.Mat());
-                cv.bitwise_and(inkThresh, inkThresh, masked, innerMask);
-                const inkPixels = cv.countNonZero(masked);
-                const totalPixels = cv.countNonZero(innerMask);
-                const fillRatio = totalPixels > 0 ? inkPixels / totalPixels : 0;
-                if (fillRatio < EMPTY_THRESHOLD) emptyCount++;
-            }
-            return emptyCount;
-        }
-    }
-
-    // ═══════════════════════════════════════════════════════════════
-    // INSTRUCTION PARSER (UPDATED WITH TRICK GATE)
+    // INSTRUCTION PARSER WITH HTML SANITIZATION
     // ═══════════════════════════════════════════════════════════════
 
     class InstructionParser {
         static parse(html) {
             const cleanText = this.#sanitize(html);
             const type = this.#detectType(cleanText);
-            // FIX: Only use cleanText for number extraction to avoid decoy HTML targets
-            const target = type === LogicType.EXACT ? this.#extractNumber(cleanText) : 0;
+            const target = type === LogicType.EXACT ? this.#extractNumber(cleanText, html) : 0;
             return { type, target, cleanText };
         }
 
         static #sanitize(html) {
-            const doc = new DOMParser().parseFromString(html, 'text/html');
+            // Remove escaped slashes from JSON-encoded strings
+            const unescaped = html.replace(/\\\//g, '/');
 
+            // Parse HTML
+            const doc = new DOMParser().parseFromString(unescaped, 'text/html');
+
+            // Remove hidden elements (handling the typo "nnone" vs "none")
             doc.querySelectorAll('*').forEach(el => {
-                const styleStr = el.getAttribute('style') || '';
+                const style = (el.getAttribute('style') || '').replace(/\s/g, '');
 
-                // TRICK GATE FIX: We split styles and check for EXACT matches.
-                // This ensures "display: nonen" is ignored and the text inside stays visible.
-                const isHidden = styleStr.split(';').some(rule => {
-                    const parts = rule.split(':');
-                    if (parts.length < 2) return false;
-                    const prop = parts[0].trim().toLowerCase();
-                    const val = parts[1].trim().toLowerCase();
-                    return (prop === 'display' && val === 'none') ||
-                           (prop === 'visibility' && val === 'hidden');
-                });
+                // Remove elements with opacity:0 or valid display:none
+                if (style.includes('opacity:0') ||
+                    style.includes('visibility:hidden') ||
+                    style.match(/display:\s*none(?!;)/)) {
+                    el.remove();
+                }
 
-                if (isHidden) el.remove();
+                // Keep elements with the typo "display:nnone" (they render visible)
             });
 
             return doc.body.textContent.toLowerCase().replace(/\s+/g, ' ').trim();
         }
 
         static #detectType(text) {
-            if (text.includes('highest number')) return LogicType.MAX;
+            if (text.includes('highest number') || text.includes('most empty')) return LogicType.MAX;
             if (text.includes('exactly')) return LogicType.EXACT;
+            if (text.includes('does not have a pair')) return LogicType.NO_PAIR;
             return LogicType.UNKNOWN;
         }
 
-        static #extractNumber(text) {
-            // Only look for the number following 'exactly' in the visual-only text
-            const rx = /exactly\s*(\d+)/;
-            const m = text.match(rx);
-            return m ? parseInt(m[1], 10) : 0;
+        static #extractNumber(text, html) {
+            // Try to extract number from cleaned text first
+            const textMatch = text.match(/exactly\s*(\d+)/);
+            if (textMatch) return parseInt(textMatch[1], 10);
+
+            // Fallback to raw HTML parsing
+            const htmlMatch = html.match(/exactly.*?(\d+)/i) || html.match(/>\s*(\d+)\s*</);
+            if (htmlMatch) return parseInt(htmlMatch[1], 10);
+
+            return 0;
         }
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // PREDICTION ENGINE
-    // ═══════════════════════════════════════════════════════════════
-
-    class Predictor {
-        static calculate(results, logic) {
-            switch (logic.type) {
-                case LogicType.MAX:
-                    return this.#findMax(results);
-                case LogicType.EXACT:
-                    return this.#findExact(results, logic.target);
-                default:
-                    return { index: -1, approximate: false };
-            }
-        }
-
-        static #findMax(results) {
-            const sorted = [...results].sort((a, b) => b.empty - a.empty || a.total - b.total);
-            return { index: sorted[0]?.empty > 0 ? sorted[0].idx : -1, approximate: false };
-        }
-
-        static #findExact(results, target) {
-            const exact = results.find(r => r.empty === target);
-            if (exact) return { index: exact.idx, approximate: false };
-            const closest = [...results].sort((a, b) => Math.abs(a.empty - target) - Math.abs(b.empty - target))[0];
-            return { index: closest?.idx ?? -1, approximate: true };
-        }
-    }
-
-    // ═══════════════════════════════════════════════════════════════
-    // UI & STYLES
+    // STYLES
     // ═══════════════════════════════════════════════════════════════
 
     class Styles {
@@ -321,7 +147,7 @@
                     user-select: none;
                 }
                 .imgui-header span:last-child { cursor: pointer; }
-                .imgui-header span:last-child:hover { color: ${C.PREDICT}; }
+                .imgui-header span:last-child:hover { color: #ff3e3e; }
                 .imgui-body { padding: 12px; }
                 .imgui-log {
                     background: ${C.BG_LOG}; padding: 10px; font-size: 14px;
@@ -340,12 +166,6 @@
                 }
                 .imgui-card:hover { transform: scale(1.02); }
                 .imgui-card img { width: 100%; display: block; border-radius: 2px; }
-                .imgui-card.predicted { border-color: ${C.PREDICT} !important; background: ${C.BG_PREDICTED}; }
-                .imgui-badge {
-                    position: absolute; top: -8px; left: 50%; transform: translateX(-50%);
-                    background: ${C.PREDICT}; color: white; font-size: 9px;
-                    padding: 2px 8px; border-radius: 10px; font-weight: bold;
-                }
                 .imgui-footer {
                     display: flex; justify-content: space-between; margin-top: 4px;
                     font-size: 11px; color: ${C.TEXT_MUTED};
@@ -361,24 +181,58 @@
         }
     }
 
+    // ═══════════════════════════════════════════════════════════════
+    // DRAGGABLE
+    // ═══════════════════════════════════════════════════════════════
+
     class Draggable {
         constructor(el, handle) {
-            this.el = el; this.pos = { x: 0, y: 0 }; this.dragging = false;
+            this.el = el;
+            this.pos = { x: 0, y: 0 };
+            this.dragging = false;
+
             handle.addEventListener('mousedown', e => this.#onDown(e));
             document.addEventListener('mousemove', e => this.#onMove(e));
             document.addEventListener('mouseup', () => this.dragging = false);
         }
-        #onDown(e) { if (e.target.closest('[id$="-close"]')) return; this.dragging = true; this.startX = e.clientX - this.pos.x; this.startY = e.clientY - this.pos.y; }
-        #onMove(e) { if (!this.dragging) return; e.preventDefault(); this.pos.x = e.clientX - this.startX; this.pos.y = e.clientY - this.startY; this.el.style.transform = `translate(${this.pos.x}px, ${this.pos.y}px)`; }
+
+        #onDown(e) {
+            if (e.target.closest('[id$="-close"]')) return;
+            this.dragging = true;
+            this.startX = e.clientX - this.pos.x;
+            this.startY = e.clientY - this.pos.y;
+        }
+
+        #onMove(e) {
+            if (!this.dragging) return;
+            e.preventDefault();
+            this.pos.x = e.clientX - this.startX;
+            this.pos.y = e.clientY - this.startY;
+            this.el.style.transform = `translate(${this.pos.x}px, ${this.pos.y}px)`;
+        }
     }
 
+    // ═══════════════════════════════════════════════════════════════
+    // PANEL
+    // ═══════════════════════════════════════════════════════════════
+
     class Panel {
-        constructor() { this.root = null; this.els = {}; }
-        init() { Styles.inject(); this.#build(); new Draggable(this.root, this.els.header); this.els.close.addEventListener('click', () => this.hide()); }
+        constructor() {
+            this.root = null;
+            this.els = {};
+        }
+
+        init() {
+            Styles.inject();
+            this.#build();
+            new Draggable(this.root, this.els.header);
+            this.els.close.addEventListener('click', () => this.hide());
+        }
+
         #build() {
             this.root = DOM.create('div', { id: 'imgui-root' }, [
                 DOM.create('div', { className: 'imgui-header', id: 'imgui-header' }, [
-                    DOM.create('span', { text: 'TCAPTCHA DEBUGGER v13.1' }),
+                    DOM.create('span', { text: 'TCAPTCHA DEBUGGER v14 (NO CV)' }),
                     DOM.create('span', { id: 'imgui-close', text: '[X]' })
                 ]),
                 DOM.create('div', { className: 'imgui-body' }, [
@@ -391,29 +245,46 @@
                 ])
             ]);
             document.body.appendChild(this.root);
-            this.els = { header: DOM.$('imgui-header'), close: DOM.$('imgui-close'), prompt: DOM.$('imgui-prompt'), grid: DOM.$('imgui-grid'), logic: DOM.$('imgui-logic'), step: DOM.$('imgui-step') };
+
+            this.els = {
+                header: DOM.$('imgui-header'),
+                close: DOM.$('imgui-close'),
+                prompt: DOM.$('imgui-prompt'),
+                grid: DOM.$('imgui-grid'),
+                logic: DOM.$('imgui-logic'),
+                step: DOM.$('imgui-step')
+            };
         }
+
         show() { this.root.style.display = 'block'; }
         hide() { this.root.style.display = 'none'; }
         setPrompt(t) { this.els.prompt.textContent = `PROMPT: ${t}`; }
         setStep(c, t) { this.els.step.textContent = `STEP: ${c} OF ${t}`; }
-        setLogic(type, target, suffix = '') { this.els.logic.textContent = `LOGIC: ${type}${target != null ? '_' + target : ''}${suffix}`; }
+        setLogic(type, target) {
+            this.els.logic.textContent = `LOGIC: ${type}${target != null ? '_' + target : ''}`;
+        }
         clearGrid() { this.els.grid.innerHTML = ''; }
         addCard(card) { this.els.grid.appendChild(card); }
     }
 
+    // ═══════════════════════════════════════════════════════════════
+    // CARD BUILDER
+    // ═══════════════════════════════════════════════════════════════
+
     class CardBuilder {
         static create(idx, b64, onClick) {
-            const img = new Image(); img.src = `data:image/png;base64,${b64}`;
-            const stats = DOM.create('span', { className: 'stats', text: '...' });
+            const img = new Image();
+            img.src = `data:image/png;base64,${b64}`;
+
             const card = DOM.create('div', { className: 'imgui-card', onClick }, [
                 img,
-                DOM.create('div', { className: 'imgui-footer' }, [DOM.create('span', { text: `#${idx}` }), stats])
+                DOM.create('div', { className: 'imgui-footer' }, [
+                    DOM.create('span', { text: `#${idx + 1}` })
+                ])
             ]);
-            return { card, img, stats };
+
+            return { card, img };
         }
-        static setStats(el, empty, total) { el.textContent = `E:${empty} T:${total}`; }
-        static markPredicted(card) { card.classList.add('predicted'); card.appendChild(DOM.create('div', { className: 'imgui-badge', text: 'PREDICTION' })); }
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -421,78 +292,88 @@
     // ═══════════════════════════════════════════════════════════════
 
     class CaptchaDebugger {
-        constructor() { this.panel = new Panel(); }
+        constructor() {
+            this.panel = new Panel();
+        }
+
         start() {
-            if (!this.#ready()) { setTimeout(() => this.start(), CONFIG.TIMING.HOOK_RETRY); return; }
+            if (!this.#ready()) {
+                setTimeout(() => this.start(), CONFIG.TIMING.HOOK_RETRY);
+                return;
+            }
             console.log('[TCaptcha Debugger] Hooks armed.');
             this.panel.init();
             this.#hook();
             this.#checkExisting();
         }
-        #ready() { return TARGET_WINDOW.TCaptcha?.setTaskId && BoxDetector.isReady; }
+
+        #ready() {
+            return TARGET_WINDOW.TCaptcha?.setTaskId;
+        }
+
         #hook() {
             const tc = TARGET_WINDOW.TCaptcha;
+
             ['setTaskId', 'setChallenge', 'setTaskItem', 'toggleSlider'].forEach(m => {
-                const orig = tc[m]; if (!orig) return;
+                const orig = tc[m];
+                if (!orig) return;
                 tc[m] = (...args) => {
                     const res = orig.apply(tc, args);
                     setTimeout(() => this.#refresh(), CONFIG.TIMING.UPDATE_DELAY);
                     return res;
                 };
             });
+
             const origClear = tc.clearChallenge;
-            tc.clearChallenge = (...args) => { origClear?.apply(tc, args); this.panel.hide(); };
+            tc.clearChallenge = (...args) => {
+                origClear?.apply(tc, args);
+                this.panel.hide();
+            };
         }
-        #checkExisting() { if (TARGET_WINDOW.TCaptcha.tasks?.length) this.#refresh(); }
-        async #refresh() {
+
+        #checkExisting() {
+            if (TARGET_WINDOW.TCaptcha.tasks?.length) this.#refresh();
+        }
+
+        #refresh() {
             const tc = TARGET_WINDOW.TCaptcha;
             const task = tc?.getCurrentTask?.();
-            if (!task) { this.panel.hide(); return; }
+
+            if (!task) {
+                this.panel.hide();
+                return;
+            }
+
             this.panel.show();
             const logic = InstructionParser.parse(task.str || '');
             this.panel.setPrompt(logic.cleanText);
             this.panel.setStep((tc.taskId || 0) + 1, tc.tasks.length);
             this.panel.setLogic(logic.type, logic.type === LogicType.EXACT ? logic.target : null);
-            const results = await this.#analyze(tc, task.items);
-            this.#highlight(results, logic);
+
+            this.#displayImages(tc, task.items);
         }
-        async #analyze(tc, items) {
+
+        #displayImages(tc, items) {
             this.panel.clearGrid();
-            const results = [];
-            const jobs = items.map((b64, idx) => new Promise(resolve => {
-                const { card, img, stats } = CardBuilder.create(idx, b64, () => this.#select(tc, idx));
+
+            items.forEach((b64, idx) => {
+                const { card } = CardBuilder.create(idx, b64, () => this.#select(tc, idx));
                 this.panel.addCard(card);
-                img.onload = () => {
-                    const { empty, total } = BoxDetector.analyze(img);
-                    results.push({ idx, empty, total, card });
-                    CardBuilder.setStats(stats, empty, total);
-                    resolve();
-                };
-                img.onerror = () => {
-                    results.push({ idx, empty: 0, total: 0, card });
-                    CardBuilder.setStats(stats, '?', '?');
-                    resolve();
-                };
-            }));
-            await Promise.all(jobs);
-            return results;
+            });
         }
+
         #select(tc, idx) {
             if (!tc.sliderNode) return;
             tc.sliderNode.value = idx + 1;
             tc.sliderNode.dispatchEvent(new Event('input', { bubbles: true }));
             tc.onNextClick();
         }
-        #highlight(results, logic) {
-            const { index, approximate } = Predictor.calculate(results, logic);
-            if (index === -1) return;
-            const match = results.find(r => r.idx === index);
-            if (match) {
-                CardBuilder.markPredicted(match.card);
-                if (approximate) this.panel.setLogic(logic.type, logic.target, ' (APPROX)');
-            }
-        }
     }
 
+    // ═══════════════════════════════════════════════════════════════
+    // ENTRY POINT
+    // ═══════════════════════════════════════════════════════════════
+
     new CaptchaDebugger().start();
+
 })();
