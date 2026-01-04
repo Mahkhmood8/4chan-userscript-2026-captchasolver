@@ -27,6 +27,8 @@ use the 60%slop.user.js
 the captchas are solved pretty easily 
  99.78% (2544 total real samples , on the python version  )
  
+ [2026-01-04 23-32-54(1).webm](https://github.com/user-attachments/assets/3beea6dc-19c5-471f-b087-d51a040c734f)
+
 [2026-01-01 15-44-05.webm](https://github.com/user-attachments/assets/674eac08-c71c-4cd7-b056-5b2f552ed71d)
 
 matrix ===> @awoooo:midov.pl
