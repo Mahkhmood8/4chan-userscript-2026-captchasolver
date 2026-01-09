@@ -1,26 +1,26 @@
 // ==UserScript==
-// @name         4chan TCaptcha ImGui - Large UI + NO_PAIR XOR Support
+// @name         relax is okay script - Star & Outlier Edition
 // @namespace    4chan-gradio-client
 // @match        https://*.4chan.org/*
-// @match        https://*.4channel.org/*
 // @grant        unsafeWindow
 // @grant        GM_xmlhttpRequest
 // @run-at       document-end
-// @version      18.0
+// @version      23.2
 // ==/UserScript==
 
 const CONFIG = Object.freeze({
     GRADIO: Object.freeze({
-        // SERVER_URL: 'http://localhost:7860',
         SERVER_URL: 'https://jihadist324r-4chanopenncvsolver1.hf.space',
         BATCH_ENDPOINT: '/api/batch',
-        DIE_ENDPOINT: '/api/die/batch', // New endpoint for specialized CV
+        OUTLIER_ENDPOINT: '/api/outlier',
+        DIE_ENDPOINT: '/api/die/batch',
         TIMEOUT: 20000,
         RETRY_ATTEMPTS: 3,
         RETRY_DELAY: 1000
     }),
     UI: Object.freeze({
-        WIDTH: 850,
+        WIDTH: 600,
+        SHOW_PANEL: false, // Set to false to disable the floating display
         COLORS: Object.freeze({
             PRIMARY: '#007acc',
             PREDICT: '#ff3e3e',
@@ -43,60 +43,80 @@ const CONFIG = Object.freeze({
     TIMING: Object.freeze({
         HOOK_RETRY: 250,
         UPDATE_DELAY: 150,
-        AUTO_SOLVE_DELAY: 800
+        AUTO_SOLVE_DELAY: 80
     }),
     LOGGING: Object.freeze({
         MAX_UI_LINES: 50,
-        ENABLED: true
+        ENABLED: true,
+        LOG_RAW_RESPONSE: true
     }),
     AUTO_SOLVE: true,
     AUTO_SUBMIT: true
 });
 
-// ═══════════════════════════════════════════════════════════════
-// LOGGER SYSTEM
-// ═══════════════════════════════════════════════════════════════
+// =============================================================================
+// CONSULA SYSTEM
+// =============================================================================
 
-class Logger {
-    static #container = null;
-    static setContainer(element) { this.#container = element; }
+class Consula {
+    static #terminal = null;
+
+    static setTerminal(element) {
+        this.#terminal = element;
+    }
+
     static #timestamp() {
         const d = new Date();
-        return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}:${d.getSeconds().toString().padStart(2, '0')}.${d.getMilliseconds().toString().padStart(3, '0')}`;
+        const hrs = d.getHours().toString().padStart(2, '0');
+        const min = d.getMinutes().toString().padStart(2, '0');
+        const sec = d.getSeconds().toString().padStart(2, '0');
+        const ms = d.getMilliseconds().toString().padStart(3, '0');
+        return `${hrs}:${min}:${sec}.${ms}`;
     }
-    static #log(level, message, color) {
+
+    static #print(level, message, color) {
         if (!CONFIG.LOGGING.ENABLED) return;
         const ts = this.#timestamp();
-        console.log(`%c[TCaptcha] [${ts}] ${message}`, `color: ${color}; font-weight: bold;`);
-        if (this.#container) {
+
+        console.log(
+            `%c[Consula] [${ts}] ${message}`,
+            `color: ${color}; font-weight: bold;`
+        );
+
+        if (this.#terminal) {
             const entry = DOM.create('div', {
                 className: 'log-entry',
                 html: `<span style="color:#666">[${ts}]</span> <span style="color:${color}">${message}</span>`
             });
-            this.#container.appendChild(entry);
-            this.#container.scrollTop = this.#container.scrollHeight;
-            while (this.#container.childElementCount > CONFIG.LOGGING.MAX_UI_LINES) {
-                this.#container.removeChild(this.#container.firstChild);
+            this.#terminal.appendChild(entry);
+            this.#terminal.scrollTop = this.#terminal.scrollHeight;
+
+            while (this.#terminal.childElementCount > CONFIG.LOGGING.MAX_UI_LINES) {
+                this.#terminal.removeChild(this.#terminal.firstChild);
             }
         }
     }
-    static info(msg) { this.#log('INFO', msg, CONFIG.UI.COLORS.TEXT_INFO); }
-    static success(msg) { this.#log('SUCCESS', msg, CONFIG.UI.COLORS.TEXT_SUCCESS); }
-    static warn(msg) { this.#log('WARN', msg, CONFIG.UI.COLORS.TEXT_WARN); }
-    static error(msg) { this.#log('ERROR', msg, CONFIG.UI.COLORS.TEXT_ERROR); }
-    static prompt(msg) { this.#log('PROMPT', `>>> ${msg}`, '#d4d4d4'); }
+
+    static info(msg) { this.#print('INFO', msg, CONFIG.UI.COLORS.TEXT_INFO); }
+    static success(msg) { this.#print('SUCCESS', msg, CONFIG.UI.COLORS.TEXT_SUCCESS); }
+    static warn(msg) { this.#print('WARN', msg, CONFIG.UI.COLORS.TEXT_WARN); }
+    static error(msg) { this.#print('ERROR', msg, CONFIG.UI.COLORS.TEXT_ERROR); }
+    static prompt(msg) { this.#print('PROMPT', `>>> ${msg}`, '#d4d4d4'); }
+    static debug(msg) { this.#print('DEBUG', msg, '#9cdcfe'); }
 }
 
-// ═══════════════════════════════════════════════════════════════
+// =============================================================================
 // GRADIO CLIENT
-// ═══════════════════════════════════════════════════════════════
+// =============================================================================
 
 class GradioClient {
-    async analyzeBatch(base64Images, endpoint = CONFIG.GRADIO.BATCH_ENDPOINT) {
+    async analyze(base64Images, endpoint) {
         const url = `${CONFIG.GRADIO.SERVER_URL}${endpoint}`;
-        const cleanImages = base64Images.map(img => img.includes(',') ? img : `data:image/jpeg;base64,${img}`);
+        const cleanImages = base64Images.map(img => {
+            return img.includes(',') ? img : `data:image/jpeg;base64,${img}`;
+        });
 
-        Logger.info(`Sending batch to ${endpoint}...`);
+        Consula.info(`Calling API: ${endpoint}...`);
         const startTime = performance.now();
 
         return new Promise((resolve, reject) => {
@@ -107,13 +127,22 @@ class GradioClient {
                 data: JSON.stringify({ images: cleanImages }),
                 timeout: CONFIG.GRADIO.TIMEOUT,
                 onload: (res) => {
-                    if (res.status !== 200) return reject(new Error(`HTTP ${res.status}`));
+                    if (res.status !== 200) {
+                        return reject(new Error(`HTTP ${res.status}`));
+                    }
                     try {
                         const data = JSON.parse(res.responseText);
                         const duration = (performance.now() - startTime).toFixed(0);
-                        Logger.success(`Inference received in ${duration}ms`);
-                        resolve(data.results || []);
-                    } catch (e) { reject(new Error('JSON Parse Error')); }
+                        Consula.success(`Received in ${duration}ms`);
+
+                        if (CONFIG.LOGGING.LOG_RAW_RESPONSE) {
+                            Consula.debug(`Raw Data: ${JSON.stringify(data).substring(0, 200)}...`);
+                        }
+
+                        resolve(data);
+                    } catch (e) {
+                        reject(new Error('JSON Parse Error'));
+                    }
                 },
                 onerror: () => reject(new Error('Network Error')),
                 ontimeout: () => reject(new Error('Timeout'))
@@ -122,42 +151,69 @@ class GradioClient {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════
-// UI & LOGIC
-// ═══════════════════════════════════════════════════════════════
+// =============================================================================
+// DOM UTILITIES & PARSER
+// =============================================================================
 
 const DOM = {
     create(tag, attrs = {}, children = []) {
         const el = document.createElement(tag);
         for (const [k, v] of Object.entries(attrs)) {
-            if (k === 'className') el.className = v;
-            else if (k === 'style' && typeof v === 'object') Object.assign(el.style, v);
-            else if (k === 'text') el.textContent = v;
-            else if (k === 'html') el.innerHTML = v;
-            else if (k.startsWith('on')) el.addEventListener(k.slice(2).toLowerCase(), v);
-            else el.setAttribute(k, v);
+            if (k === 'className') {
+                el.className = v;
+            } else if (k === 'style' && typeof v === 'object') {
+                Object.assign(el.style, v);
+            } else if (k === 'text') {
+                el.textContent = v;
+            } else if (k === 'html') {
+                el.innerHTML = v;
+            } else if (k.startsWith('on')) {
+                el.addEventListener(k.slice(2).toLowerCase(), v);
+            } else {
+                el.setAttribute(k, v);
+            }
         }
-        children.forEach(c => c && el.appendChild(typeof c === 'string' ? document.createTextNode(c) : c));
+        children.forEach(c => {
+            if (c) {
+                el.appendChild(typeof c === 'string' ? document.createTextNode(c) : c);
+            }
+        });
         return el;
     },
-    $(id) { return document.getElementById(id); }
+    $(id) {
+        return document.getElementById(id);
+    }
 };
 
 class InstructionParser {
     static parse(html) {
         const unescaped = html.replace(/\\\//g, '/');
         const doc = new DOMParser().parseFromString(unescaped, 'text/html');
+
         doc.querySelectorAll('*').forEach(el => {
             const style = (el.getAttribute('style') || '').replace(/\s/g, '');
-            if (style.includes('opacity:0') || style.includes('visibility:hidden') || (style.includes('display:none') && !style.includes('nnone'))) {
+            const isHidden = style.includes('opacity:0') ||
+                             style.includes('visibility:hidden') ||
+                             (style.includes('display:none') && !style.includes('nnone'));
+            if (isHidden) {
                 el.remove();
             }
         });
+
         const text = doc.body.textContent.toLowerCase().replace(/\s+/g, ' ').trim();
 
-        let type = 'UNKNOWN', target = 0, keyword = 'empty';
-        if (text.includes('dotted')) keyword = 'dotted';
-        else if (text.includes('empty')) keyword = 'empty';
+        let type = 'UNKNOWN';
+        let target = 0;
+        let keyword = 'empty';
+
+        if (text.includes('4 spikes')) keyword = 'shuriken';
+        else if (text.includes('5 spikes')) keyword = 'pentagram';
+        else if (text.includes('6 spikes')) keyword = 'hexragram';
+        else if (text.includes('7 spikes')) keyword = 'star7';
+        else if (text.includes('8 spikes')) keyword = 'star8';
+        else if (text.includes('dotted')) keyword = 'dotted dice';
+        else if (text.includes('empty')) keyword = 'empty dice';
+        else if (text.includes('dice') || text.includes('pie') || text.includes('pip')) keyword = 'dice';
 
         if (text.includes('highest') || text.includes('most') || text.includes('maximum')) {
             type = 'MAX';
@@ -165,99 +221,156 @@ class InstructionParser {
             type = 'EXACT';
             const m = text.match(/exactly\s*(\d+)/) || html.match(/>\s*(\d+)\s*</);
             if (m) target = parseInt(m[1], 10);
-        } else if (text.includes('not have a pair') || text.includes('not like the others')) {
-            type = 'NO_PAIR';
+        } else if (text.includes('pair') || text.includes('not like the others') || text.includes('odd one out')) {
+            type = 'OUTLIER';
         }
 
-        Logger.info(`Parser: [${keyword}] [${type}] Target:${target}`);
+        Consula.info(`Parser: [Key:${keyword}] [Mode:${type}] [Target:${target}]`);
         return { type, target, keyword, cleanText: text };
     }
 }
+
+// =============================================================================
+// CONSULA PANEL
+// =============================================================================
 
 class Panel {
     constructor() {
         this.root = null;
         this.els = {};
+        this.isVisible = false;
     }
 
     init() {
+        if (!CONFIG.UI.SHOW_PANEL) return;
+
         const { WIDTH, COLORS: C } = CONFIG.UI;
         document.head.appendChild(DOM.create('style', { html: `
-            #imgui-root {
+            #consula-root {
                 position: fixed; top: 40px; right: 20px; width: ${WIDTH}px;
                 background: ${C.BG_DARK}; border: 1px solid ${C.BORDER};
                 border-top: 5px solid ${C.PRIMARY}; box-shadow: 0 15px 40px rgba(0,0,0,0.9);
-                z-index: 2147483647; font-family: 'Segoe UI', 'Consolas', monospace; color: ${C.TEXT}; display: none;
+                z-index: 2147483647; font-family: 'Segoe UI', sans-serif; color: ${C.TEXT}; display: none;
                 border-radius: 8px; overflow: hidden;
             }
-            .imgui-header { background: ${C.BG_HEADER}; padding: 12px 16px; cursor: move; display: flex; justify-content: space-between; font-size: 14px; font-weight: bold; border-bottom: 1px solid ${C.BORDER}; user-select: none; }
-            .imgui-body { padding: 20px; }
-            .imgui-log-container {
-                background: ${C.BG_LOG}; border: 1px solid ${C.BORDER_CARD};
-                margin-bottom: 15px; height: 180px; overflow-y: auto;
-                padding: 10px; font-size: 13px; line-height: 1.5;
+            .consula-header {
+                background: ${C.BG_HEADER}; padding: 12px 16px; cursor: move;
+                display: flex; justify-content: space-between; font-size: 14px;
+                font-weight: bold; border-bottom: 1px solid ${C.BORDER}; user-select: none;
             }
-            .log-entry { margin-bottom: 4px; border-bottom: 1px solid #222; padding-bottom: 4px; word-break: break-all; }
-            .imgui-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
-            .imgui-card { background: ${C.BG_CARD}; border: 3px solid ${C.BORDER_CARD}; padding: 5px; cursor: pointer; position: relative; border-radius: 6px; transition: transform 0.1s ease; }
-            .imgui-card:hover { transform: scale(1.02); }
-            .imgui-card img { width: 100%; border-radius: 4px; display: block; }
-            .imgui-card.predicted { border-color: ${C.PREDICT}; background: ${C.BG_PREDICTED}; box-shadow: 0 0 15px rgba(255, 62, 62, 0.3); }
-            .imgui-badge { position: absolute; top: -10px; left: 50%; transform: translateX(-50%); background: ${C.PREDICT}; color: white; font-size: 11px; padding: 2px 10px; border-radius: 12px; z-index: 10; font-weight: bold; box-shadow: 0 2px 5px rgba(0,0,0,0.5); }
-            .imgui-count { font-size: 13px; text-align: center; margin-top: 6px; font-weight: bold; color: ${C.TEXT}; }
-            .imgui-status { margin-top: 20px; font-size: 13px; color: ${C.TEXT_MUTED}; display: flex; justify-content: space-between; border-top: 1px solid ${C.BORDER}; padding-top: 10px; }
+            .consula-body { padding: 20px; }
+            .consula-log-container {
+                background: ${C.BG_LOG}; border: 1px solid ${C.BORDER_CARD};
+                margin-bottom: 15px; height: 160px; overflow-y: auto;
+                padding: 10px; font-size: 12px; line-height: 1.4;
+            }
+            .log-entry { margin-bottom: 4px; border-bottom: 1px solid #222; padding-bottom: 4px; }
+            .consula-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+            .consula-card {
+                background: ${C.BG_CARD}; border: 3px solid ${C.BORDER_CARD};
+                padding: 5px; cursor: pointer; position: relative; border-radius: 6px;
+            }
+            .consula-card img { width: 100%; border-radius: 4px; display: block; }
+            .consula-card.predicted { border-color: ${C.PREDICT}; background: ${C.BG_PREDICTED}; }
+            .consula-badge {
+                position: absolute; top: -10px; left: 50%; transform: translateX(-50%);
+                background: ${C.PREDICT}; color: white; font-size: 10px; padding: 2px 8px;
+                border-radius: 10px; z-index: 10; font-weight: bold;
+            }
+            .consula-count { font-size: 12px; text-align: center; margin-top: 5px; font-weight: bold; }
+            .consula-status {
+                margin-top: 15px; font-size: 12px; color: ${C.TEXT_MUTED};
+                display: flex; justify-content: space-between; border-top: 1px solid ${C.BORDER};
+                padding-top: 10px;
+            }
         `}));
 
-        this.root = DOM.create('div', { id: 'imgui-root' }, [
-            DOM.create('div', { className: 'imgui-header', id: 'imgui-hdr' }, [
-                DOM.create('span', { text: 'TCAPTCHA ANALYZER - NO_PAIR PATCH' }),
-                DOM.create('span', { text: '[X]', style: { cursor: 'pointer', color: '#888' }, onclick: () => this.hide() })
+        this.root = DOM.create('div', { id: 'consula-root' }, [
+            DOM.create('div', { className: 'consula-header', id: 'consula-hdr' }, [
+                DOM.create('span', { text: 'CONSULA ANALYZER V23.2' }),
+                DOM.create('span', {
+                    text: '[X]',
+                    style: { cursor: 'pointer' },
+                    onclick: () => this.hide()
+                })
             ]),
-            DOM.create('div', { className: 'imgui-body' }, [
-                DOM.create('div', { className: 'imgui-log-container', id: 'imgui-log' }),
-                DOM.create('div', { className: 'imgui-grid', id: 'imgui-grid' }),
-                DOM.create('div', { className: 'imgui-status' }, [
-                    DOM.create('span', { id: 'imgui-logic', text: 'Logic: Initializing' }),
-                    DOM.create('span', { id: 'imgui-step', text: 'Step: -/-' })
+            DOM.create('div', { className: 'consula-body' }, [
+                DOM.create('div', { className: 'consula-log-container', id: 'consula-log' }),
+                DOM.create('div', { className: 'consula-grid', id: 'consula-grid' }),
+                DOM.create('div', { className: 'consula-status' }, [
+                    DOM.create('span', { id: 'consula-logic', text: 'Logic: Ready' }),
+                    DOM.create('span', { id: 'consula-step', text: 'Step: -/-' })
                 ])
             ])
         ]);
 
         document.body.appendChild(this.root);
         this.els = {
-            log: DOM.$('imgui-log'),
-            grid: DOM.$('imgui-grid'),
-            logic: DOM.$('imgui-logic'),
-            step: DOM.$('imgui-step'),
-            hdr: DOM.$('imgui-hdr')
+            log: DOM.$('consula-log'),
+            grid: DOM.$('consula-grid'),
+            logic: DOM.$('consula-logic'),
+            step: DOM.$('consula-step'),
+            hdr: DOM.$('consula-hdr')
         };
 
-        Logger.setContainer(this.els.log);
+        Consula.setTerminal(this.els.log);
         this.#setupDragging();
     }
 
     #setupDragging() {
-        let mx=0, my=0;
+        if (!this.els.hdr) return;
+        let mx = 0, my = 0;
         this.els.hdr.onmousedown = (e) => {
-            mx = e.clientX; my = e.clientY;
+            mx = e.clientX;
+            my = e.clientY;
             document.onmousemove = (e) => {
-                const x = mx - e.clientX; const y = my - e.clientY;
-                mx = e.clientX; my = e.clientY;
+                const x = mx - e.clientX;
+                const y = my - e.clientY;
+                mx = e.clientX;
+                my = e.clientY;
                 this.root.style.top = (this.root.offsetTop - y) + "px";
                 this.root.style.left = (this.root.offsetLeft - x) + "px";
             };
-            document.onmouseup = () => { document.onmousemove = null; document.onmouseup = null; };
+            document.onmouseup = () => {
+                document.onmousemove = null;
+            };
         };
     }
 
-    show() { this.root.style.display = 'block'; }
-    hide() { this.root.style.display = 'none'; }
-    clear() { this.els.grid.innerHTML = ''; }
+    show() {
+        if (!CONFIG.UI.SHOW_PANEL) return;
+        this.isVisible = true;
+        this.#renderVisibility();
+    }
+
+    hide() {
+        this.isVisible = false;
+        this.#renderVisibility();
+    }
+
+    showConsula() {
+        this.#renderVisibility();
+    }
+
+    #renderVisibility() {
+        if (this.root) {
+            this.root.style.display = (this.isVisible && CONFIG.UI.SHOW_PANEL) ? 'block' : 'none';
+        }
+    }
+
+    clear() {
+        if (this.els.grid) this.els.grid.innerHTML = '';
+    }
+
     updateStatus(step, total, logicText) {
-        this.els.step.textContent = `STEP: ${step}/${total}`;
-        this.els.logic.textContent = `LOGIC: ${logicText}`;
+        if (this.els.step) this.els.step.textContent = `STEP: ${step}/${total}`;
+        if (this.els.logic) this.els.logic.textContent = `LOGIC: ${logicText}`;
     }
 }
+
+// =============================================================================
+// CONTROLLER
+// =============================================================================
 
 class CaptchaController {
     constructor() {
@@ -267,15 +380,19 @@ class CaptchaController {
     }
 
     start() {
-        if (!unsafeWindow.TCaptcha?.setTaskId) return setTimeout(() => this.start(), CONFIG.TIMING.HOOK_RETRY);
+        if (!unsafeWindow.TCaptcha?.setTaskId) {
+            return setTimeout(() => this.start(), CONFIG.TIMING.HOOK_RETRY);
+        }
         this.panel.init();
         this.#hook();
-        Logger.success('UI Started - Specialized Die API Support Enabled');
+        Consula.success('Consula Controller Hooked');
     }
 
     #hook() {
         const tc = unsafeWindow.TCaptcha;
-        ['setTaskId', 'setChallenge', 'setTaskItem', 'onNextClick'].forEach(m => {
+        const methods = ['setTaskId', 'setChallenge', 'setTaskItem', 'onNextClick'];
+
+        methods.forEach(m => {
             if (typeof tc[m] === 'function') {
                 const orig = tc[m];
                 tc[m] = (...args) => {
@@ -290,95 +407,123 @@ class CaptchaController {
     async #refresh() {
         const tc = unsafeWindow.TCaptcha;
         const task = tc?.getCurrentTask?.();
-        if (!task) { this.lastId = null; this.panel.hide(); return; }
+
+        if (!task) {
+            this.lastId = null;
+            this.panel.hide();
+            this.panel.showConsula();
+            return;
+        }
 
         const id = `${tc.taskId}-${task.items?.length}-${task.str.length}`;
         if (this.lastId === id) return;
         this.lastId = id;
 
         this.panel.show();
+        this.panel.showConsula();
         this.panel.clear();
 
         const logic = InstructionParser.parse(task.str);
-        Logger.prompt(logic.cleanText);
+        Consula.prompt(logic.cleanText);
         this.panel.updateStatus((tc.taskId || 0) + 1, tc.tasks.length, `${logic.type}`);
 
         try {
-            let results = [];
+            let processedResults = [];
 
-            if (logic.type === 'NO_PAIR') {
-                // Use the specialized die API for NO_PAIR
-                results = await this.api.analyzeBatch(task.items, CONFIG.GRADIO.DIE_ENDPOINT);
+            if (logic.type === 'OUTLIER') {
+                const data = await this.api.analyze(task.items, CONFIG.GRADIO.OUTLIER_ENDPOINT);
+                processedResults = (data.results || []).map(r => ({
+                    score: r.outlier_score,
+                    isWinner: r.index === data.outlier_index,
+                    label: `Score: ${r.outlier_score.toFixed(3)}`
+                }));
+            } else if (logic.keyword === 'dice') {
+                const data = await this.api.analyze(task.items, CONFIG.GRADIO.DIE_ENDPOINT);
+                const counts = data.results.map(r => r.pips || 0);
+
+                let winnerIdx = -1;
+                if (logic.type === 'MAX') {
+                    winnerIdx = counts.indexOf(Math.max(...counts));
+                } else if (logic.type === 'EXACT') {
+                    let minDiff = Infinity;
+                    counts.forEach((c, i) => {
+                        const diff = Math.abs(c - logic.target);
+                        if (diff < minDiff) {
+                            minDiff = diff;
+                            winnerIdx = i;
+                        }
+                    });
+                }
+
+                processedResults = counts.map((c, i) => ({
+                    count: c,
+                    isWinner: i === winnerIdx,
+                    label: `Pips: ${c}`
+                }));
             } else {
-                // Use the general batch API for MAX/EXACT tasks
-                const rawResults = await this.api.analyzeBatch(task.items, CONFIG.GRADIO.BATCH_ENDPOINT);
-                results = rawResults.map(res => {
-                    const detections = res.detections || [];
-                    const filtered = detections.filter(d => d.class.includes(logic.keyword));
-                    return { ...res, count: filtered.length };
+                const data = await this.api.analyze(task.items, CONFIG.GRADIO.BATCH_ENDPOINT);
+                const results = data.results || [];
+
+                const counts = results.map((r, idx) => {
+                    const filtered = (r.detections || []).filter(d => d.class === logic.keyword);
+                    if (CONFIG.LOGGING.LOG_RAW_RESPONSE) {
+                        const classesFound = (r.detections || []).map(d => d.class).join(', ');
+                        Consula.debug(`Img ${idx} detections: [${classesFound || 'None'}]`);
+                    }
+                    return filtered.length;
                 });
+
+                let winnerIdx = -1;
+                if (logic.type === 'MAX') {
+                    winnerIdx = counts.indexOf(Math.max(...counts));
+                } else if (logic.type === 'EXACT') {
+                    let minDiff = Infinity;
+                    counts.forEach((c, i) => {
+                        const diff = Math.abs(c - logic.target);
+                        if (diff < minDiff) {
+                            minDiff = diff;
+                            winnerIdx = i;
+                        }
+                    });
+                }
+
+                processedResults = counts.map((c, i) => ({
+                    count: c,
+                    isWinner: i === winnerIdx,
+                    label: `${logic.keyword}: ${c}`
+                }));
             }
 
-            this.#process(tc, task.items, results, logic);
-        } catch (e) { Logger.error(`Analysis Failed: ${e.message}`); }
+            this.#render(tc, task.items, processedResults);
+        } catch (e) {
+            Consula.error(`Analysis Failed: ${e.message}`);
+        }
     }
 
-    #process(tc, items, results, logic) {
-        let bestIdx = -1, bestVal = -1;
+    #render(tc, items, results) {
+        const winnerIdx = results.findIndex(r => r.isWinner);
 
-        if (logic.type === 'MAX') {
-            results.forEach((r, i) => { if (r.count > bestVal) { bestVal = r.count; bestIdx = i; } });
-        } else if (logic.type === 'EXACT') {
-            let minDiff = Infinity;
-            results.forEach((r, i) => {
-                const diff = Math.abs(r.count - logic.target);
-                if (diff < minDiff) { minDiff = diff; bestIdx = i; bestVal = r.count; }
+        if (CONFIG.UI.SHOW_PANEL) {
+            items.forEach((b64, i) => {
+                const res = results[i];
+                const card = DOM.create('div', {
+                    className: `consula-card ${res.isWinner ? 'predicted' : ''}`,
+                    onclick: () => {
+                        this.#applyAction(tc, i);
+                        tc.onNextClick();
+                    }
+                }, [
+                    DOM.create('img', { src: b64.includes(',') ? b64 : `data:image/png;base64,${b64}` }),
+                    res.isWinner ? DOM.create('div', { className: 'consula-badge', text: 'MATCH' }) : null,
+                    DOM.create('div', { className: 'consula-count', text: res.label })
+                ]);
+                this.panel.els.grid.appendChild(card);
             });
-        } else if (logic.type === 'NO_PAIR') {
-            // ═══════════════════════════════════════════════════════════════
-            // SPECIALIZED XOR LOGIC
-            // ═══════════════════════════════════════════════════════════════
-            let xorSum = 0;
-            // Iterate through results from /api/die/batch
-            results.forEach(res => {
-                // res.pips is returned by your computer vision backend
-                xorSum ^= (res.pips || 0);
-            });
-
-            // The remaining xorSum is the pip count of the unique die
-            bestVal = xorSum;
-            bestIdx = results.findIndex(r => r.pips === xorSum);
-
-            Logger.success(`XOR Solved! Unique Pip Count: ${bestVal} | Found at Index: ${bestIdx}`);
         }
 
-        Logger.info(`Strategy: ${logic.type} | Target/BestVal: ${bestVal} | Best Index: ${bestIdx}`);
-
-        items.forEach((b64, i) => {
-            const isBest = i === bestIdx;
-            const res = results[i];
-
-            // Determine text to show based on API used
-            const countLabel = logic.type === 'NO_PAIR' ? `Pips: ${res.pips}` : `Found: ${res.count}`;
-
-            const card = DOM.create('div', {
-                className: `imgui-card ${isBest ? 'predicted' : ''}`,
-                onclick: () => {
-                    this.#applyAction(tc, i);
-                    tc.onNextClick();
-                }
-            }, [
-                DOM.create('img', { src: b64.includes(',') ? b64 : `data:image/png;base64,${b64}` }),
-                isBest ? DOM.create('div', { className: 'imgui-badge', text: 'MATCHED' }) : null,
-                DOM.create('div', { className: 'imgui-count', text: countLabel })
-            ]);
-            this.panel.els.grid.appendChild(card);
-        });
-
-        // Trigger Auto-Solve if enabled and a match was found
-        if (CONFIG.AUTO_SOLVE && bestIdx !== -1) {
+        if (CONFIG.AUTO_SOLVE && winnerIdx !== -1) {
             setTimeout(() => {
-                this.#applyAction(tc, bestIdx);
+                this.#applyAction(tc, winnerIdx);
                 if (CONFIG.AUTO_SUBMIT) tc.onNextClick();
             }, CONFIG.TIMING.AUTO_SOLVE_DELAY);
         }
@@ -389,7 +534,7 @@ class CaptchaController {
         tc.sliderNode.value = idx + 1;
         tc.sliderNode.dispatchEvent(new Event('input', { bubbles: true }));
         tc.sliderNode.dispatchEvent(new Event('change', { bubbles: true }));
-        Logger.info(`Applied Slider -> ${idx + 1}`);
+        Consula.info(`Slider set to ${idx + 1}`);
     }
 }
 
